@@ -5,13 +5,13 @@
 // ou no limite, o servidor tenta o próximo automaticamente.
 // Lista atual em: https://ai.google.dev/gemini-api/docs/models
 const MODELS = {
-  rapido: ['gemini-2.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-2.5-flash'],
-  equilibrado: ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-  profundo: ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
+  rapido: ['gemini-flash-lite-latest', 'gemini-3.8-flash', 'gemini-flash-latest'],
+  equilibrado: ['gemini-flash-latest', 'gemini-3.8-flash'],
+  profundo: ['gemini-flash-latest', 'gemini-3.8-flash']
 };
 
 // Erros temporários: vale tentar outro modelo
-const RETRY_STATUS = [429, 500, 502, 503, 504];
+const RETRY_STATUS = [404, 429, 500, 502, 503, 504];
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -94,9 +94,6 @@ export default {
       const model = candidates[i];
 
       const payload = { ...basePayload, generationConfig: {} };
-      if (body.mode === 'profundo' && !model.includes('lite')) {
-        payload.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
-      }
 
       let res;
       try {
