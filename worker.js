@@ -1,13 +1,17 @@
 // Backend da Lume — Cloudflare Worker + Gemini (plano gratuito)
 // A chave fica no segredo GEMINI_KEY (nunca no front-end).
 
-// Se algum modelo mudar de nome, é só trocar aqui.
+// Cada modo tem uma lista de modelos: se o primeiro estiver sobrecarregado
+// ou no limite, o servidor tenta o próximo automaticamente.
 // Lista atual em: https://ai.google.dev/gemini-api/docs/models
 const MODELS = {
-  rapido: 'gemini-2.5-flash-lite',
-  equilibrado: 'gemini-flash-latest',
-  profundo: 'gemini-flash-latest'
+  rapido: ['gemini-2.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-2.5-flash'],
+  equilibrado: ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+  profundo: ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
 };
+
+// Erros temporários: vale tentar outro modelo
+const RETRY_STATUS = [429, 500, 502, 503, 504];
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -20,6 +24,8 @@ const json = (data, status = 200) =>
     status,
     headers: { 'Content-Type': 'application/json', ...CORS }
   });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Converte o formato do front-end (estilo Claude) para o do Gemini
 function toGemini(messages) {
@@ -73,40 +79,68 @@ export default {
       return json({ error: 'Requisição inválida.' }, 400);
     }
 
-    const model = MODELS[body.mode] || MODELS.equilibrado;
+    const candidates = MODELS[body.mode] || MODELS.equilibrado;
 
-    const payload = {
+    const basePayload = {
       systemInstruction: { parts: [{ text: String(body.system || '') }] },
-      contents: toGemini(body.messages || []),
-      generationConfig: {}
+      contents: toGemini(body.messages || [])
     };
 
-    if (body.mode === 'profundo') {
-      payload.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
+    let upstream = null;
+    let lastStatus = 500;
+    let lastMsg = 'Erro desconhecido.';
+
+    for (let i = 0; i < candidates.length; i++) {
+      const model = candidates[i];
+
+      const payload = { ...basePayload, generationConfig: {} };
+      if (body.mode === 'profundo' && !model.includes('lite')) {
+        payload.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
+      }
+
+      let res;
+      try {
+        res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': env.GEMINI_KEY
+            },
+            body: JSON.stringify(payload)
+          }
+        );
+      } catch {
+        lastStatus = 502;
+        lastMsg = 'Não consegui falar com o Gemini.';
+        continue;
+      }
+
+      if (res.ok) {
+        upstream = res;
+        break;
+      }
+
+      lastStatus = res.status;
+      try {
+        const e = await res.json();
+        if (e?.error?.message) lastMsg = e.error.message;
+      } catch {}
+
+      // Erro que não é temporário (chave errada, pedido inválido): não adianta tentar outro
+      if (!RETRY_STATUS.includes(res.status)) break;
+
+      await sleep(400);
     }
 
-    const upstream = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': env.GEMINI_KEY
-        },
-        body: JSON.stringify(payload)
+    if (!upstream) {
+      if (lastStatus === 429) {
+        lastMsg = 'Limite gratuito atingido. Espere um pouco e tente de novo.';
+      } else if (RETRY_STATUS.includes(lastStatus)) {
+        lastMsg = 'Os modelos estão sobrecarregados agora. Tente de novo em alguns segundos.';
       }
-    );
-
-    if (!upstream.ok) {
-      let msg = `Erro ${upstream.status} do Gemini`;
-      try {
-        const e = await upstream.json();
-        if (e?.error?.message) msg = e.error.message;
-      } catch {}
-      if (upstream.status === 429) {
-        msg = 'Limite gratuito atingido. Espere um pouco e tente de novo.';
-      }
-      return json({ error: msg }, upstream.status);
+      return json({ error: lastMsg }, lastStatus);
     }
 
     const encoder = new TextEncoder();
