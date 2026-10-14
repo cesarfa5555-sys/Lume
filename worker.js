@@ -5,8 +5,8 @@
 // Lista atual em: https://ai.google.dev/gemini-api/docs/models
 const MODELS = {
   rapido: 'gemini-2.5-flash-lite',
-  equilibrado: 'gemini-2.5-flash',
-  profundo: 'gemini-2.5-flash'
+  equilibrado: 'gemini-flash-latest',
+  profundo: 'gemini-flash-latest'
 };
 
 const CORS = {
