@@ -1,5 +1,10 @@
-// Cole aqui a URL do seu Worker (sem barra no final)
-const API = 'https://lume.efootabll886.workers.dev';
+// Modelos Claude via Puter. Se algum nome mudar, é só editar aqui.
+// O app tenta o primeiro da lista e, se o modelo não existir, tenta o próximo.
+const MODELS = {
+  rapido: ['claude-haiku-5-5', 'claude-haiku-4-5'],
+  equilibrado: ['claude-sonnet-5-5', 'claude-sonnet-4-5'],
+  profundo: ['claude-opus-5-5', 'claude-opus-4-5', 'claude-sonnet-5-5']
+};
 const $ = (s) => document.querySelector(s);
 
 const state = {
@@ -18,6 +23,8 @@ const hints = {
 };
 
 const SYSTEM_PROMPT = `Você é a Lume, uma assistente de inteligência artificial em português do Brasil.
+
+A Lume usa outra IA para pensar: os modelos Claude, da empresa Anthropic.
 
 Diretrizes:
 - Seja extremamente útil, precisa, clara e objetiva.
@@ -247,33 +254,37 @@ function scrollDown(force) {
 }
 
 /* ---------- Envio ---------- */
-function toApi(messages) {
-  return messages.map((message) => {
+function toPuter(messages) {
+  const list = [{ role: 'system', content: SYSTEM_PROMPT }];
+
+  messages.forEach((message) => {
     if (message.role === 'user' && message.images?.length) {
-      return {
+      list.push({
         role: 'user',
         content: [
-          ...message.images.map((image) => ({
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: image.type,
-              data: image.data
-            }
-          })),
           {
             type: 'text',
             text: message.text || 'Analise esta imagem com atenção e explique o que você observa.'
-          }
+          },
+          ...message.images.map((image) => ({
+            type: 'image_url',
+            image_url: { url: `data:${image.type};base64,${image.data}` }
+          }))
         ]
-      };
+      });
+      return;
     }
 
-    return {
-      role: message.role,
-      content: message.text || '…'
-    };
+    list.push({ role: message.role, content: message.text || '…' });
   });
+
+  return list;
+}
+
+function errText(error) {
+  if (!error) return 'erro desconhecido';
+  if (typeof error === 'string') return error;
+  return error.message || error.error?.message || error.error || JSON.stringify(error);
 }
 
 async function send(text) {
@@ -282,6 +293,16 @@ async function send(text) {
   text = text.trim();
 
   if (!text && !state.pending.length) return;
+
+  // Pede login do Puter na primeira vez (cada pessoa usa a própria conta)
+  if (window.puter && !puter.auth.isSignedIn()) {
+    try {
+      await puter.auth.signIn();
+    } catch {
+      alert('Para usar a Lume, entre com sua conta grátis do Puter.');
+      return;
+    }
+  }
 
   const chat = state.current;
 
@@ -341,61 +362,40 @@ async function stream() {
   };
 
   try {
-    const response = await fetch(`${API}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: toApi(chat.messages),
-        mode: state.mode,
-        system: SYSTEM_PROMPT
-      }),
-      signal: state.ctrl.signal
-    });
-
-    if (!response.ok) {
-      let message = `Erro ${response.status}`;
-
-      try {
-        const data = await response.json();
-        if (data?.error) message = data.error;
-      } catch {}
-
-      throw new Error(message);
+    if (!window.puter) {
+      throw new Error('o Puter não carregou (confira a internet e o index.html)');
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    const candidates = MODELS[state.mode] || MODELS.equilibrado;
+    const messages = toPuter(chat.messages);
+    let lastError = null;
 
-    while (true) {
-      const { value, done } = await reader.read();
+    for (const model of candidates) {
+      try {
+        const response = await puter.ai.chat(messages, { model, stream: true });
 
-      if (done) break;
+        for await (const part of response) {
+          if (state.ctrl.signal.aborted) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
-
-      for (const part of parts) {
-        const line = part.replace(/^data: /, '');
-        if (!line) continue;
-
-        const event = JSON.parse(line);
-
-        if (event.error) throw new Error(event.error);
-
-        if (event.t) {
-          full += event.t;
-
-          if (!animation) {
-            animation = requestAnimationFrame(paint);
+          if (part?.text) {
+            full += part.text;
+            if (!animation) animation = requestAnimationFrame(paint);
           }
         }
+
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        // só tenta o próximo modelo se o erro for de modelo inexistente e nada foi escrito ainda
+        if (full || !/model|not found|invalid|unknown/i.test(errText(error))) break;
       }
     }
+
+    if (lastError) throw lastError;
   } catch (error) {
-    if (error.name !== 'AbortError') {
-      full += `${full ? '\n\n' : ''}<span class="error">Não consegui responder agora: ${error.message}. Verifique se o servidor da Lume está online e tente novamente.</span>`;
+    if (error?.name !== 'AbortError') {
+      full += `${full ? '\n\n' : ''}<span class="error">Não consegui responder agora: ${errText(error)}. Tente novamente em instantes.</span>`;
     }
   }
 
@@ -651,18 +651,10 @@ $('#menuBtn').onclick = () => {
 
 $('#scrim').onclick = closeSide;
 
-(async function health() {
-  try {
-    const response = await fetch(`${API}/api/health`);
-
-    if (!response.ok) throw new Error('offline');
-
-    $('#status').className = 'status ok';
-    $('#statusText').textContent = 'Online';
-  } catch {
-    $('#status').className = 'status err';
-    $('#statusText').textContent = 'Offline';
-  }
+(function health() {
+  const ok = !!window.puter;
+  $('#status').className = ok ? 'status ok' : 'status err';
+  $('#statusText').textContent = ok ? 'Online' : 'Offline';
 })();
 
 newChat();
