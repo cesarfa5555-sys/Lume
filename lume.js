@@ -1,5 +1,5 @@
 // Cole aqui a URL do seu Worker (sem barra no final)
-const API = 'https://lume.efootabll886.workers.dev'.replace(/\/+$/, '');
+const API = 'https://lume.efootabll886.workers.dev';
 const $ = (s) => document.querySelector(s);
 
 const state = {
